@@ -89,11 +89,7 @@ float latitude = 0;
 float longitude = 0;
 uint16_t lora_packet = 0;
 float gps_altitude = 0;
-char teamID[] = "TEAM1";
-char state[16] = "IDLE"; // Add your team ID
-int time = 0;
-int packetCount = 0;
-float voltage = 3.3f;  // Placeholder - add ADC later
+
 
 /* USER CODE END PV */
 /* USER CODE END PTD */
@@ -109,8 +105,6 @@ float voltage = 3.3f;  // Placeholder - add ADC later
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
-
 I2C_HandleTypeDef hi2c1;
 
 SPI_HandleTypeDef hspi1;
@@ -130,7 +124,6 @@ static void MX_I2C1_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM1_Init(void);
-static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 /* USER CODE BEGIN PFP */
 void usb_print(char *msg);  // forward declaration
@@ -530,23 +523,24 @@ void lora_debug_registers()
 
 void calibrate_mpu()
 {
+    int32_t ax=0, ay=0, az=0;
     int32_t gx=0, gy=0, gz=0;
-    int32_t az=0;
     int count = 0;
 
     for(int i=0;i<CALIB_SAMPLES;i++)
     {
         if(read_raw() == HAL_OK)
         {
-            az += (int16_t)((raw_data[4] << 8) | raw_data[5]);
+            ax += (raw_data[0] << 8) | raw_data[1];
+            ay += (raw_data[2] << 8) | raw_data[3];
+            az += (raw_data[4] << 8) | raw_data[5];
 
-            gx += (int16_t)((raw_data[8] << 8) | raw_data[9]);
-            gy += (int16_t)((raw_data[10] << 8) | raw_data[11]);
-            gz += (int16_t)((raw_data[12] << 8) | raw_data[13]);
+            gx += (raw_data[8] << 8) | raw_data[9];
+            gy += (raw_data[10] << 8) | raw_data[11];
+            gz += (raw_data[12] << 8) | raw_data[13];
 
             count++;
         }
-
         HAL_Delay(SAMPLE_DELAY);
     }
 
@@ -556,125 +550,57 @@ void calibrate_mpu()
         return;
     }
 
-    // DO NOT CALIBRATE X/Y ACCEL
-    Ax_offset = 0;
-    Ay_offset = 0;
+    Ax_offset = ax/count;
+    Ay_offset = ay/count;
+    Az_offset = az/count - 8192;
 
-    // REMOVE ONLY Z GRAVITY OFFSET
-    Az_offset = (az / count) - 8192;
-
-    // GYRO OFFSETS
-    Gx_offset = gx / count;
-    Gy_offset = gy / count;
-    Gz_offset = gz / count;
+    Gx_offset = gx/count;
+    Gy_offset = gy/count;
+    Gz_offset = gz/count;
 }
 
-void lora_send_telemetry()
+void lora_send(uint8_t *data, uint8_t len)
 {
     char dbg[64];
-    packetCount++;  // Increment packet counter
-    time = HAL_GetTick() / 1000;  // Seconds since boot
 
-    // Determine state
-    if(released && servo_done) strcpy(state, "DROPPED");
-    else if(released) strcpy(state, "TRIG");
-    else if(kalman_alt > 10) strcpy(state, "ARMED");
-    else strcpy(state, "IDLE");
-
-    uint8_t packet[80];  // Increased size for full telemetry
-    uint8_t i = 0;
-
-    // Team ID (6 chars + null)
-    const char* team_str = teamID;
-    uint8_t team_len = strlen(teamID);
-    packet[i++] = team_len;
-    memcpy(&packet[i], teamID, team_len);
-    i += team_len;
-
-    // Time (int32_t, 4 bytes)
-    int32_t time32 = (int32_t)time;
-    memcpy(&packet[i], &time32, 4); i += 4;
-
-    // Packet Count (int32_t, 4 bytes)
-    int32_t pkt32 = (int32_t)packetCount;
-    memcpy(&packet[i], &pkt32, 4); i += 4;
-
-    // Altitude (float, 4 bytes)
-    float alt = kalman_alt;
-    memcpy(&packet[i], &alt, 4); i += 4;
-
-    // Pressure (float, 4 bytes)
-    float pres = pressure;
-    memcpy(&packet[i], &pres, 4); i += 4;
-
-    // Temperature (float, 4 bytes)
-    float temp = temperature;
-    memcpy(&packet[i], &temp, 4); i += 4;
-
-    // Voltage (float, 4 bytes)
-    memcpy(&packet[i], &voltage, 4); i += 4;
-
-    // Latitude (double, 8 bytes)
-    double lat = (double)latitude;
-    memcpy(&packet[i], &lat, 8); i += 8;
-
-    // Longitude (double, 8 bytes)
-    double lon = (double)longitude;
-    memcpy(&packet[i], &lon, 8); i += 8;
-
-    // GPS Altitude (float, 4 bytes)
-    float gps_alt = gps_altitude;
-    memcpy(&packet[i], &gps_alt, 4); i += 4;
-
-    // Satellites (int32_t, 4 bytes)
-    int32_t sats = (int32_t)satellites;
-    memcpy(&packet[i], &sats, 4); i += 4;
-
-    // Accel X,Y,Z (QVector3D -> 3 floats = 12 bytes)
-    float ax = Ax_g;
-    float ay = Ay_g;
-    float az = Az_g;
-    memcpy(&packet[i], &ax, 4); i += 4;
-    memcpy(&packet[i], &ay, 4); i += 4;
-    memcpy(&packet[i], &az, 4); i += 4;
-
-    // Gyro (single float - RMS or Z-axis)
-    float gyro_rms = sqrtf(Gx_dps*Gx_dps + Gy_dps*Gy_dps + Gz_dps*Gz_dps) / sqrtf(3.0f);
-    memcpy(&packet[i], &gyro_rms, 4); i += 4;
-
-    // State (6 chars + null)
-    const char* state_str = state;
-    uint8_t state_len = strlen(state);
-    packet[i++] = state_len;
-    memcpy(&packet[i], state, state_len);
-    i += state_len;
-
-    sprintf(dbg, "LoRa TX %d bytes (pkt#%d)\r\n", i, packetCount);
+    sprintf(dbg, "LoRa TX %d bytes\r\n", len);
     usb_print(dbg);
-
     HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_RESET);
+    // Go standby before writing FIFO
+    lora_write(0x01, 0x81);
 
-    // Send using existing LoRa logic
-    lora_write(0x01, 0x81);  // Standby
-    lora_write(0x12, 0xFF);  // Clear IRQs
-    lora_write(0x0E, 0x00);  // TX base
-    lora_write(0x0D, 0x00);  // FIFO ptr
+    // Clear all previous IRQ flags
+    lora_write(0x12, 0xFF);
 
-    for(uint8_t j = 0; j < i; j++) {
-        lora_write(0x00, packet[j]);
+    // Reset FIFO base + ptr
+    lora_write(0x0E, 0x00);   // TX base
+    lora_write(0x0D, 0x00);   // FIFO addr ptr
+
+    // Write payload
+    for(uint8_t i = 0; i < len; i++)
+    {
+        lora_write(0x00, data[i]);
     }
 
-    lora_write(0x22, i);  // Payload length
-    lora_write(0x01, 0x83);  // Start TX
+    // Payload length
+    lora_write(0x22, len);
 
-    // Wait TxDone
-    while((lora_read(0x12) & 0x08) == 0);
+    // Start TX
+    lora_write(0x01, 0x83);
+
+    // Wait for TxDone
+    while((lora_read(0x12) & 0x08) == 0)
+    {
+    }
     HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
+    HAL_Delay(50);
+    usb_print("LoRa TX Done\r\n");
 
-    lora_write(0x12, 0x08);  // Clear TxDone
-    lora_write(0x01, 0x81);  // Standby
+    // Clear TxDone
+    lora_write(0x12, 0x08);
 
-    usb_print("Telemetry TX Done\r\n");
+    // Back to standby
+    lora_write(0x01, 0x81);
 }
 /* USER CODE END 0 */
 
@@ -712,7 +638,6 @@ int main(void)
   MX_USART1_UART_Init();
   MX_SPI1_Init();
   MX_TIM1_Init();
-  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
 
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
@@ -801,138 +726,173 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  // Check MPU connection
+  // Check MPU connection
 
-	        if(HAL_I2C_IsDeviceReady(&hi2c1, MPU6050_ADD, 3, 100) != HAL_OK)
-	        {
-	            usb_print("MPU NOT FOUND\r\n");
-	            HAL_Delay(1000);
-	            continue;
-	        }
+        if(HAL_I2C_IsDeviceReady(&hi2c1, MPU6050_ADD, 3, 100) != HAL_OK)
+        {
+            usb_print("MPU NOT FOUND\r\n");
+            HAL_Delay(1000);
+            continue;
+        }
 
-	        /* ================= MPU6050 ================= */
-	        if(read_raw() == HAL_OK)
-	        {
-	            /* ===== OFFSET COMPENSATION ===== */
-	            Ax = ((int16_t)(raw_data[0] << 8 | raw_data[1])) - Ax_offset;
-	            Ay = ((int16_t)(raw_data[2] << 8 | raw_data[3])) - Ay_offset;
-	            Az = ((int16_t)(raw_data[4] << 8 | raw_data[5])) - Az_offset;
+        /* ================= MPU6050 ================= */
+        if(read_raw() == HAL_OK)
+        {
+            /* ===== OFFSET COMPENSATION ===== */
+            Ax = ((int16_t)(raw_data[0] << 8 | raw_data[1])) - Ax_offset;
+            Ay = ((int16_t)(raw_data[2] << 8 | raw_data[3])) - Ay_offset;
+            Az = ((int16_t)(raw_data[4] << 8 | raw_data[5])) - Az_offset;
 
-	            Gx = ((int16_t)(raw_data[8] << 8 | raw_data[9])) - Gx_offset;
-	            Gy = ((int16_t)(raw_data[10] << 8 | raw_data[11])) - Gy_offset;
-	            Gz = ((int16_t)(raw_data[12] << 8 | raw_data[13])) - Gz_offset;
+            Gx = ((int16_t)(raw_data[8] << 8 | raw_data[9])) - Gx_offset;
+            Gy = ((int16_t)(raw_data[10] << 8 | raw_data[11])) - Gy_offset;
+            Gz = ((int16_t)(raw_data[12] << 8 | raw_data[13])) - Gz_offset;
 
-	            /* ===== CONVERT TO REAL UNITS ===== */
-	            Ax_g = Ax / 8192.0f;
-	            Ay_g = Ay / 8192.0f;
-	            Az_g = Az / 8192.0f;
+            /* ===== CONVERT TO REAL UNITS ===== */
+            Ax_g = Ax / 8192.0f;
+            Ay_g = Ay / 8192.0f;
+            Az_g = Az / 8192.0f;
 
-	            Gx_dps = Gx / 131.0f;
-	            Gy_dps = Gy / 131.0f;
-	            Gz_dps = Gz / 131.0f;
+            Gx_dps = Gx / 131.0f;
+            Gy_dps = Gy / 131.0f;
+            Gz_dps = Gz / 131.0f;
 
-	            /* ===== SOFTWARE LOW PASS FILTER ===== */
-	            static float gx_f = 0;
-	            static float gy_f = 0;
-	            static float gz_f = 0;
+            /* ===== SOFTWARE LOW PASS FILTER ===== */
+            static float gx_f = 0;
+            static float gy_f = 0;
+            static float gz_f = 0;
 
-	            gx_f = gx_f * 0.90f + Gx_dps * 0.10f;
-	            gy_f = gy_f * 0.90f + Gy_dps * 0.10f;
-	            gz_f = gz_f * 0.90f + Gz_dps * 0.10f;
+            gx_f = gx_f * 0.90f + Gx_dps * 0.10f;
+            gy_f = gy_f * 0.90f + Gy_dps * 0.10f;
+            gz_f = gz_f * 0.90f + Gz_dps * 0.10f;
 
-	            Gx_dps = gx_f;
-	            Gy_dps = gy_f;
-	            Gz_dps = gz_f;
-	        }
-	        else
-	        {
-	            usb_print("MPU READ ERROR\r\n");
-	            HAL_Delay(200);
-	            continue;
-	        }
+            Gx_dps = gx_f;
+            Gy_dps = gy_f;
+            Gz_dps = gz_f;
+        }
+        else
+        {
+            usb_print("MPU READ ERROR\r\n");
+            HAL_Delay(200);
+            continue;
+        }
 
-	        ms5611_read();
-	        if(pressure > 300.0f && pressure < 1100.0f && pressure_baseline > 300.0f)
-	        {
-	        	float new_alt = 44330.0f *
-	        	(1.0f - powf(pressure / pressure_baseline, 0.1903f));
+        ms5611_read();
+        if(pressure > 300.0f && pressure < 1100.0f && pressure_baseline > 300.0f)
+        {
+        float new_alt = 44330.0f *
+        (1.0f - powf(pressure / pressure_baseline, 0.1903f));
 
-	        	/* ===== REMOVE TINY BARO DRIFT ===== */
-	        	if(fabs(new_alt) < 0.30f)
-	        	{
-	        	    new_alt = 0;
-	        	}
+        /* ===== REMOVE TINY BARO DRIFT ===== */
+        if(fabs(new_alt) < 0.30f)
+        {
+            new_alt = 0;
+        }
 
-	        	/* ===== SMOOTH ALTITUDE ===== */
-	        	if(!isnan(new_alt) && !isinf(new_alt))
-	        	{
-	        	    altitude = altitude * 0.95f + new_alt * 0.05f;
-	        	}
-	        }
+        /* ===== SMOOTH ALTITUDE ===== */
+        if(!isnan(new_alt) && !isinf(new_alt))
+        {
+            altitude = altitude * 0.95f + new_alt * 0.05f;
+        }
+        }
 
-	        float accel_z = (Az_g * 9.81f) - 9.81f;
+        float accel_z = (Az_g * 9.81f) - 9.81f;
 
-	        /* ===== REMOVE SMALL NOISE ===== */
-	        if(fabs(accel_z) < 0.08f)
-	        {
-	            accel_z = 0;
-	        }
+        /* ===== REMOVE SMALL NOISE ===== */
+        if(fabs(accel_z) < 0.08f)
+        {
+            accel_z = 0;
+        }
 
-	        /* ===== KALMAN UPDATE ===== */
-	        kalman_update(altitude, accel_z);
+        /* ===== KALMAN UPDATE ===== */
+        kalman_update(altitude, accel_z);
 
-	        /* ===== STOP VELOCITY DRIFT ===== */
-	        if(fabs(kalman_vel) < 0.03f)
-	        {
-	            kalman_vel = 0;
-	        }
-	        /* ===== DRONE DROP SERVO LOGIC ===== */
+        /* ===== STOP VELOCITY DRIFT ===== */
+        if(fabs(kalman_vel) < 0.03f)
+        {
+            kalman_vel = 0;
+        }
 
-	        /* Arm after drone climbs */
-	        // ===== ARM =====
-	        // ===== TOTAL ACCELERATION =====
-	        // ===== TOTAL ACCELERATION =====
-	        // ===== FILTERED Z ACCELERATION =====
+        if(!released)
+        {
+            if(Az_g <= 0)
+            {
+                released = 1;
+                drop_time = HAL_GetTick();
+                usb_print("TRIGGERED\r\n");
+            }
+        }
 
+        // ===== SERVO OPEN =====
+        if(released && !servo_done)
+        {
+            servo_open();
+            servo_done = 1;
+            usb_print("SERVO OPEN\r\n");
+        }
 
-	        // ===== FREE FALL DETECTION USING Z ONLY =====
+        char msg[220];
+        sprintf(msg,
+        "AX:%.2f AY:%.2f AZ:%.2f | "
+        "GX:%.2f GY:%.2f GZ:%.2f | "
+        "P:%.2f mbar | T:%.2f C | ALT:%.2f m | "
+        "LAT:%.5f LON:%.5f | GPS_ALT:%.2f | SAT:%d|VEL:%.2f\r\n",
 
+        Ax_g, Ay_g, Az_g,
+        Gx_dps, Gy_dps, Gz_dps,
+        pressure, temperature, kalman_alt,
+        latitude, longitude,
+        gps_altitude,
+        satellites, kalman_vel);
 
-	        if(!released)
-	        {
-	            if(Az_g <= 0)
-	            {
-	                released = 1;
-	                drop_time = HAL_GetTick();
-	                usb_print("TRIGGERED\r\n");
-	            }
-	        }
+        usb_print(msg);
 
-	        // ===== SERVO OPEN =====
-	        if(released && !servo_done)
-	        {
-	            servo_open();
-	            servo_done = 1;
-	            usb_print("SERVO OPEN\r\n");
-	        }
+        uint8_t packet[32];
+        uint8_t i = 0;
 
-	        char msg[220];
-	        sprintf(msg,
-	        "AX:%.2f AY:%.2f AZ:%.2f | "
-	        "GX:%.2f GY:%.2f GZ:%.2f | "
-	        "P:%.2f mbar | T:%.2f C | ALT:%.2f m | "
-	        "LAT:%.5f LON:%.5f | GPS_ALT:%.2f | SAT:%d|VEL:%.2f\r\n",
+        uint16_t pkt = lora_packet++;
 
-	        Ax_g, Ay_g, Az_g,
-	        Gx_dps, Gy_dps, Gz_dps,
-	        pressure, temperature, kalman_alt,
-	        latitude, longitude,
-	        gps_altitude,
-	        satellites, kalman_vel);
+        int16_t alt  = (int16_t)(kalman_alt * 100);
+        int16_t vel  = (int16_t)(kalman_vel * 100);
+        uint16_t pres = (uint16_t)(pressure * 10);
+        int16_t temp = (int16_t)(temperature * 100);
 
-	        usb_print(msg);
-	        lora_send_telemetry();
-	        HAL_Delay(200);
+        int16_t gx = (int16_t)(Gx_dps * 10);
+        int16_t gy = (int16_t)(Gy_dps * 10);
+        int16_t gz = (int16_t)(Gz_dps * 10);
+        int16_t ax = (int16_t)(Ax_g * 100);
+        int16_t ay = (int16_t)(Ay_g * 100);
+        int16_t az = (int16_t)(Az_g * 100);
+
+        int32_t lat = (int32_t)(latitude * 10000);
+        int32_t lon = (int32_t)(longitude * 10000);
+
+        /* Copy into packet */
+        memcpy(&packet[i], &pkt, 2); i += 2;
+        memcpy(&packet[i], &alt, 2); i += 2;
+        memcpy(&packet[i], &vel, 2); i += 2;
+        memcpy(&packet[i], &pres, 2); i += 2;
+        memcpy(&packet[i], &temp, 2); i += 2;
+
+        packet[i++] = satellites;
+        packet[i++] = gps_fix;
+
+        /* Gyroscope */
+        memcpy(&packet[i], &gx, 2); i += 2;
+        memcpy(&packet[i], &gy, 2); i += 2;
+        memcpy(&packet[i], &gz, 2); i += 2;
+
+        /* Acceleration */
+        memcpy(&packet[i], &ax, 2); i += 2;
+        memcpy(&packet[i], &ay, 2); i += 2;
+        memcpy(&packet[i], &az, 2); i += 2;
+
+        /* GPS */
+        memcpy(&packet[i], &lat, 4); i += 4;
+        memcpy(&packet[i], &lon, 4); i += 4;
+
+        /* Send */
+        lora_send(packet, i);
+        HAL_Delay(200);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -949,25 +909,32 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 25;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 16;
   RCC_OscInitStruct.PLL.PLLN = 336;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
   RCC_OscInitStruct.PLL.PLLQ = 7;
-
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -977,58 +944,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief ADC1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_ADC1_Init(void)
-{
-
-  /* USER CODE BEGIN ADC1_Init 0 */
-
-  /* USER CODE END ADC1_Init 0 */
-
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_0;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
-
 }
 
 /**
